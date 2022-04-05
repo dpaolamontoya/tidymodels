@@ -1,0 +1,497 @@
+---
+title: "Bloque 1: Modelos usando paquetería `H2O`"
+subtitle: "Analítica basada en árboles de clasificación y regresión"
+author: "Dra. Diana Paola Montoya Escobar dpmontoy@gmail.com"
+date: "Febrero 2022"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    theme: cosmo
+    highlight: tango
+  github_document:
+    toc: yes
+    dev: jpeg
+---
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(echo= TRUE,
+                      fig.height = 6, fig.width = 7)
+```
+
+<style>
+.forceBreak { -webkit-column-break-after: always; break-after: column; }
+</style>
+
+<center>
+![](./images/dry_tree.png){width=10%}
+</center>
+
+# ¿Qué es [`H20`](http://docs.h2o.ai/h2o/latest-stable/h2o-docs/index.html)?
+
+<center>
+![](./images/h2o.png){width=15%}
+</center>
+
+Es un paquete creado por la compañía [H2O.ai](https://www.h2o.ai/) que busca combinar los principales algoritmos de *machine learning* y aprendizaje estadístico con el *Big Data*. Su forma de comprimir y almacenar los datos permite trabajar con millones de registros (empleando todos sus cores) o un *cluster* de muchos computadores.  
+
+Gracias a sus API, es posible acceder a todos sus funciones desde *R*, *Python* o *Scala*, así como en la interfaz web *Flow*.
+
+# Conexión entre `H2O` Y R
+
+Todo el manejo se hace desde R. Hay que considerar que, aunque todo se maneja desde R, los datos se encuentran en el cluster de H2O, no en memoria.  Es decir, sólo cuando los datos se cargan en memoria se puede utilizar las funciones propias de R.
+
+Las funciones `as.data.frame()` y `as.h2o()` permiten transferir datos de R al cluster de H2O y viceversa.  Hay que tener cuidado cuando se transfieran datos de H2O a R, porque implica cargar en RAM todos los datos y, si son muchos, puede ocupar toda la memoria. 
+
+
+# Ejemplo con H2O
+
+## Datos 
+
+Analizaremos el conjunto de datos `SaratogaHiyses`, que se encuentra en el paquete `nisaucData` (el cual usamos de ejemplo en tidymodels), el cual contiene información sobre los precio de 1,728 viviendas de Saratoga County, New York, USA en el año 2006. 
+
+```{r}
+library(tidyverse)
+data("SaratogaHouses", package = "mosaicData")
+data <- SaratogaHouses
+colnames(data)
+```
+
+Para exportar los datos en un `.csv` lo hacemos con la siguiente función:
+
+```{r}
+write.csv("data","saratogaHiyses.csv")
+```
+
+## Inicialización de `H20`
+
+Lo primero que debemos hacer es instalar el paquete `h2o` con la función en nuestra consola `install.packages("h2o")`. Para este ejemplo en `h2o`, se emplea un único computador del que se utilizan varios *cores* en paralelo.
+
+```{r}
+library(h2o)    # para la conexión de h2o
+library(ggpubr) # paquetería que utilizaremos para visualización
+```
+
+Creamos el cluster local con todos los cores disponibles de la siguiente forma:
+
+```{r}
+# inicialización de h2o
+h2o.init(
+  ip = "localhost",
+  # -1 indica que se empleen todos los cores disponibles.
+  nthreads = -1,
+  # Máxima memoria disponible para el cluster.
+  max_mem_size = "6g"
+)
+```
+
+Se eliminan los datos del cluster por si ya había sido inicializado.
+```{r}
+h2o.removeAll()
+h2o.no_progress()   # Para que no se muestre la barra de progreso.
+```
+
+Tras iniciar el cluster (local), se muestran por pantalla sus características, entre las que están: el número de cores activados (4), la memoria total del cluster (5.32 GB), el número de nodos (1 porque se está empleando un único computador) y el puerto con el que conectarse a la interfaz web de H2O ([http://localhost:54321/flow/index.html](http://localhost:54321/flow/index.html)).
+
+
+## Carga de datos
+
+La carga de datos puede hacerse directamente al cluster `H2O`, o bien cargándolos primero en memoria en la sesión de R y después transfiriéndolos. La segunda opción no es aconsejable si el volumen de datos es muy grande.
+
+Para nuestro caso el conjunto de datos de SaratogaHouses es suficientemente pequeño y lo podemos almacenar en memoria, por tanto lo podemos llamar con la siguiente función.
+
+```{r}
+datos_h2o <- as.h2o(x = SaratogaHouses, destination_frame = "datos_h2o")
+```
+
+En canso de contar con un `.csv` lo podemos cargar directamente a `h2o` de la siguiente forma
+
+```{r eval=FALSE, include=FALSE}
+# Carga de datos en el cluster H2O desde local.
+datos_h2o <- h2o.importFile(
+              path   = "./SaratogaHouses.csv",
+              header = TRUE,
+              sep    = ",",
+              destination_frame = "datos_h2o"
+             )
+```
+
+## Exploración de datos desde `h2o`
+
+Cuando el conjunto de datos es muy grande, y no tenemos la posibilidad de utilizar las paqueterías de R para la exploración de datos, podemos hacerlo con funciones propias de `h2o`. A continuación mencionaremos algunos de los ejemplos utilizados para esta exploración:
+
+```{r}
+# Dimensiones del set de datos
+h2o.dim(datos_h2o)
+```
+
+```{r}
+# Nombre de las columnas
+h2o.colnames(datos_h2o)
+```
+
+La función `h2o.describe()` es similar a la función `summary()`, es muy útil para obtener un análisis rápido que muestre el tipo de datos, la cantidad de valores ausentes, el valor mínimo, máximo, media, desviación típica y el número de categorías (Cardinality) de cada una de las variables. `h2o` emplea el nombre `enum` para los datos de tipo `factor` o `character`.
+
+```{r}
+h2o.describe(datos_h2o)
+```
+
+Para conocer el índice o nombre de las columnas que son de un determinado tipo, por ejemplo, numérico, se emplea la función `h2o.columns_by_type()`.
+
+```{r}
+# Índices
+indices <- h2o.columns_by_type(object = datos_h2o, coltype = "numeric")
+indices
+```
+
+```{r}
+# Nombres
+h2o.colnames(x = datos_h2o)[indices]
+```
+
+Con la función `h2o.cor()` se calcula la correlación entre dos o más columnas numéricas.
+
+```{r}
+indices <- h2o.columns_by_type(object = datos_h2o, coltype = "numeric")
+h2o.cor(x = datos_h2o[, indices], y = NULL, method = "Pearson", na.rm = TRUE)
+```
+
+Para contar el número de observaciones de cada clase en una variable categórica, como es en este caso la variable  `"fuel"`, se emplea la función `h2o.table()`.
+
+```{r}
+# Se crea una tabla con el número de observaciones de cada tipo.
+tabla_muestra <- as.data.frame(h2o.table(datos_h2o$fuel))
+tabla_muestra
+```
+
+Una vez creada la tabla, se carga en el entorno de R para poder hacer la visualización.
+
+```{r}
+ggplot(
+  data = tabla_muestra,
+  aes(x = fuel, y = Count, fill = fuel)) +
+geom_col() +
+scale_fill_manual(values = c("gray50", "orangered2","blue")) +
+theme_bw() +
+labs(
+  x = "Fuel", y = "Número de observaciones",
+  title = "Distribución de la variable Fuel") +
+theme(legend.position = "none")
+```
+
+## Separación de training, validación y test
+
+Antes de hacer la separación tengamos claro la diferencia entre estas particiones del conjunto de datos:
+
+* **Datos de train:** la muestra de los datos utilizada para ajustar el modelo.
+
+* **Datos de validación:**  la muestra de datos que se utiliza para proporcionar una evaluación imparcial de un ajuste de modelo en el conjunto de datos de train mientras se ajustan los hiperparámetros del modelo. La evaluación se vuelve más sesgada a medida que la habilidad del conjunto de datos de validación se incorpora a la configuración del modelo.
+
+* **Datos de test:** la muestra de datos utilizada para proporcionar una evaluación imparcial de un ajuste final del modelo en el conjunto de datos de entrenamiento.
+
+<center>
+![](./images/dif_train_val_test.png)
+</center>
+
+
+
+La función `h2o.splitFrame()` realiza particiones aleatorias, pero no permite hacerlas de forma estratificada, *por lo que no asegura que la distribución de clases de variable respuesta sea igual en todas particiones*. Esto puede ser problemático con datos muy desbalanceados (alguno de los grupos es muy minoritario).
+
+Para realizar esta partición tenemos la opción de colocar los datos de training, validación y test.  Como lo hicimos en el ejemplo de `tidymodels`, podemos utilizar sólo los dos primeros. Para este caso, podemos ejecutarlo de la siguiente manera:
+
+```{r}
+# Separación de las observaciones en conjunto de entrenamiento y test.
+particiones     <- h2o.splitFrame(data = datos_h2o, ratios = c(0.8), seed = 123)
+datos_train_h2o <- h2o.assign(data = particiones[[1]], key = "datos_train_H2O")
+datos_test_h2o  <- h2o.assign(data = particiones[[2]], key = "datos_test_H2O")
+```
+
+En el código anterior, lo que tenemos es primero la definición de las particiones por medio de la función `h2o.splitFrame`, donde especificamos el conjunto de datos en `h2o` y la partición de los datos de training (0.8 es decir 80%), por lo tanto, el algoritmo entiende de los datos de test van a tener el 20%. Y la semilla la colocaremos con 123. Luego se especifíca cada uno de los subconjuntos y con la especificación  `particiones[[1]]` estamos diciendo que este conjunto será de training. Como solo pusimos dos subconjuntos el algoritmo entenderá que el dos es de test.
+
+En el momento en que consideremos la validación, debemos agregar en los `ratios` el porcentaje de la validación, en este caso será train (60%), validación (20%) y test (20%). En la semilla se le agrega el numeral 4 y se adiciona un nuevo subconjunto de datos, entendiendo que el 1 es train, el 2 es validación y el 3 es test.
+
+```{r}
+# Separación de las observaciones en conjunto de entrenamiento y test.
+particiones     <- h2o.splitFrame(data = datos_h2o, ratios = c(0.6,0.2), seed = 1234)
+datos_train_h2o <- h2o.assign(data = particiones[[1]], key = "datos_train_H2O")
+datos_valid_h2o <- h2o.assign(data = particiones[[2]], key = "datos_valid_H2O")
+datos_test_h2o  <- h2o.assign(data = particiones[[3]], key = "datos_test_H2O")
+```
+
+Podemos comparar las distribuciones de los tres subconjuntos con la función `summary`.
+
+```{r}
+summary(datos_train_h2o$price)
+```
+```{r}
+summary(datos_valid_h2o$price)
+```
+
+```{r}
+summary(datos_test_h2o$price)
+```
+
+Podemos ver que las distribuciones son similares para los tres conjuntos de datos para este conjunto de datos.
+
+## Procesamiento de los datos
+
+`h2o` incorpora y automatiza muchas de las transformaciones necesarias para que los datos puedan ser ingeridos por los algoritmos de *machine learning*. Esto es distinto a la mayoría de librerías de machine learning de otros lenguajes como *Python* y *R*, donde las etapas de preprocesado suelen ser independientes del entrenamiento del modelo. En concreto, H2O automatiza las siguientes transformaciones:
+
+### Variables categóricas en `h2o`
+
+En el momento de ajustar un modelo (GLM, GBM, DRF, Deep Learning, K-Means, Aggregator, XGBoost), `h2o` identifica automáticamente que variables son categóricas y crea internamente las variables dummy correspondientes. Es altamente recomendable permitir que `h2o` realice este proceso en lugar de hacerlo externamente, ya que su implementación está muy optimizada. El comportamiento de la codificación de las variables categóricas puede controlarse con el argumento `categorical_encoding`, por defecto su valor es `"AUTO"`.
+
+### Estandarización
+
+Por defecto, `h2o` estandariza los predictores numéricos antes de ajustar los modelos para que todos tengan media cero y varianza uno. Este comportamiento se puede controlar con el argumento `standardize`. Es importante tener en cuenta que, para muchos modelos (*lasso*, *ridge*, *Deep Learning*…), es necesario realizar la estandarización de predictores.
+
+
+### Eliminación de variables con varianza cero
+No se deben de incluir en un modelo predictores que contengan un único valor (varianza cero), ya que no aportan información. Los algoritmos de `h2o` excluyen directamente las columnas con valor constante. Este comportamiento se puede controlar mediante el argumento `ignore_const_cols`.
+
+### Balance de clases
+
+Cuando hacemos problemas de clasificación, podemos tener datos desbalanceados, es decir, que el número de observaciones pertenecientes a cada grupo sea muy dispareja. Por ejemplo, tres grupos, uno de 1000, otro de 800 y otro de 200. En esos casos, el modelo puede tener dificultades para aprender a identificar las observaciones del grupo minoritario.  Con el argumento `balance_classes` se puede indicar que antes de ajustar el modelo se equilibren las clases mediante undersampling u oversampling. Por defecto, este comportamiento está desactivado.
+
+`h2o` dispone de un [listado de funciones](http://docs.h2o.ai/h2o/latest-stable/h2o-docs/data-munging.html) para manipular y transformar los datos, sin embargo, con frecuencia no son suficientes para resolver todas las necesidades de preprocesado. En estos casos es necesario recurrir a R, si el volumen de datos es limitado, o a Spark si la información no se puede cargar en memoria.
+
+# Modelos en `h2o`
+
+
+`h2o` incorpora los siguientes modelos de *machine learning*. Todos ellos están implementados de forma que puedan trabajar, en la medida de lo posible, de forma distribuida y/o en paralelo.
+
+* Modelos supervisados
+
+-- Cox Proportional Hazards (CoxPH) 
+
+-- Deep Learning (Neural Networks)
+
+-- Distributed Random Forest (DRF)
+
+-- Generalized Linear Model (GLM)
+
+-- Gradient Boosting Machine (GBM)
+
+-- Naïve Bayes Classifier
+
+-- Stacked Ensembles
+
+-- XGBoost
+
+
+* Modelos no supervisados
+
+-- Aggregator
+
+-- Generalized Low Rank Models (GLRM)
+
+-- K-Means Clustering
+
+-- Isolation Forest
+
+-- Principal Component Analysis (PCA)
+
+* Otros
+
+-- Word2vec
+
+## Optimización de hiperparámetros
+
+`h2o` emplea la función `h2o.grid()` para realizar la búsqueda de los mejores hiperparámetros, sus argumentos principales son: el nombre del algoritmo, los parámetros del algoritmo, una lista con los valores de los hiperparámetros que se quieren comparar, el tipo de búsqueda (“Cartesian” o “RandomDiscrete”) y, si es de tipo random, un criterio de parada. Una vez que la búsqueda ha finalizado, el objeto `grid` creado contiene todos los modelos, para acceder a ellos es necesario extraerlos.
+
+## Comparación del ejemplo con randomForest y GBM
+
+Ya hemos divido nuestros datos, esta vez en tres subconjuntos: train, valid, test. Si queremos ver la cabeza de los datos de train:
+
+```{r}
+head(datos_train_h2o)
+```
+
+### Modelo con Random Forest
+
+La función para este modelo en `h2o` es `h2o.randomForest`.  Dentro de ella debemos de especificar los datos de train que convertimos dentro de `h2o` y, si así lo queremos los datos de validación.  Para cuando no queremos utilizar datos de validación esta línea se omite dentro del modelo cambia la partición del conjunto de datos.
+
+```{r}
+random_forest_model <- h2o.randomForest(
+  training_frame = datos_train_h2o, # datos de h2o para training
+  validation_frame = datos_valid_h2o, # datos de h2o para validación (no es requerido)
+  x = 2:16, # Las columnas predictoras, por índice
+  y = 1,    # La columna que queremos predecir, variable objetivo
+  model_id = "rf_covType_v1",  # nombre del modelo en h2o
+  ntrees = 200, # número de árboles
+  stopping_rounds = 2, # PAra cuando el promedio de dos árboles está dentro de 0.001 (predeterminado)
+  score_each_iteration = T, # Predecir contra training y validación para cada árbol
+  seed = 1000000  # Establecer una semilla aleatoria para que se pueda reproducir
+)
+```
+
+Ahora mostremos un resumen del modelo:
+
+```{r}
+summary(random_forest_model)
+```
+
+Una forma más directa de acceder a las métricas de validación. Las métricas de rendimiento dependen del tipo de modelo que se está construyendo. 
+
+```{r}
+random_forest_model@model$validation_metrics
+```
+
+### Modelo con Gradient Boosting Machine (GBM)
+
+Primero haremos todas la configuraciones predeterminadas y luego comenzaremos a hacer algunos cambios donde se describen los parámetros y los valores predeterminados.
+
+Podemos observar una estructura muy similar a la del random forest, ahora utilizaremos la función `h2o.gbm` y lo que cambiaremos para este caso, es el `model_id`. NOTA: En la mayoría de los algoritmos el primero es para regresión y el segundo para clasificación.
+
+```{r}
+gbm_model <- h2o.gbm(
+  training_frame = datos_train_h2o, # datos de h2o para training
+  validation_frame = datos_valid_h2o, # datos de h2o para validación (no es requerido)
+  x = 2:16, # Las columnas predictoras, por índice
+  y = 1,    # La columna que queremos predecir, variable objetivo
+  model_id = "gbm_covType1", # nombre del modelo en h2o
+  seed = 2000000   # Establecer una semilla aleatoria para que se pueda reproducir
+) 
+```
+
+Ahora podemos hacer un resumen del modelo:
+
+```{r}
+summary(gbm_model)
+```
+
+Podemos ver la evolución del modelo, para evaluar cómo aprende el modelo a medida que se añaden nuevos árboles al ensamble.  
+
+`h2o` almacena las métricas de entrenamiento y test bajo el nombre de scoring. Los valores se encuentran almacenados dentro del modelo.
+
+```{r}
+scoring <- as.data.frame(gbm_model@model$scoring_history)
+head(scoring)
+```
+
+En los modelos GBM, se puede estudiar la influencia de los predictores cuantificando la reducción total de error cuadrático que ha conseguido cada predictor en el conjunto de todos los árboles que forman el modelo.
+
+```{r}
+importancia <- as.data.frame(gbm_model@model$variable_importances)
+importancia
+```
+
+```{r}
+ggplot(data = importancia,
+       aes(x = reorder(variable, scaled_importance), y = scaled_importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Importancia de los predictores en el modelo GBM",
+       subtitle = "Importancia en base a la reducción del error cuadrático medio",
+       x = "Predictor",
+       y = "Importancia relativa") +
+  theme_bw()
+```
+
+### Modelo GBM cambiando parámetros 
+
+Ahora podemos calcular las métricas para hacer la comparación con el random forest.
+
+```{r}
+gbm_model@model$validation_metrics
+```
+
+En este caso, salió mejor este segundo método, pero no siempre sucede esto, especialmente cuando podemos los valores predeterminados en el modelo. Cuando esto sucede podemos ajustar nuestro modelo para mejorar el rendimiento y el tiempo de ejecución. Lo que podemos hacer es:
+
+1. Agregar árboles, el valor predeterminado es 50.
+
+2. Aumentar la taza de aprendizaje. Cada árbol se volverá más fuerte, por lo que el modelo lo alejará más de la media general.
+
+3. Aumentar la profundidad.  Agregar profundidad hace que cada árbol se ajuste a los datos más cercanos.
+
+Un ejemplo cambiando estos parámetros es el siguiente:
+```{r}
+gbm_model_2 <- h2o.gbm(
+  training_frame = datos_train_h2o, # datos de h2o para training
+  validation_frame = datos_valid_h2o, # datos de h2o para validación (no es requerido)
+  x = 2:16, # Las columnas predictoras, por índice
+  y = 1,    # La columna que queremos predecir, variable objetivo
+  model_id = "gbm_covType1", # nombre del modelo en h2o
+  ntrees = 200, 
+  max_depth = 30,
+  stopping_rounds = 2,
+  stopping_tolerance = 1e-2,
+  seed = 2000000   # Establecer una semilla aleatoria para que se pueda reproducir
+) 
+```
+
+Calculamos las métricas:
+
+```{r}
+gbm_model_2@model$validation_metrics
+```
+Aumentó respecto al anterior.
+
+### Predicciones y error 
+
+Una vez hemos ajustado el modelo, se puede predecir nuevas observaciones y estimar el error de test.
+
+```{r}
+# Predictores para el modelo de random forest
+predicciones <- h2o.predict(
+  object = random_forest_model,
+  newdata = datos_test_h2o
+)
+head(predicciones)
+```
+```{r}
+# Predictores para el modelo de GBM
+predicciones_2 <- h2o.predict(
+  object = gbm_model,
+  newdata = datos_test_h2o
+)
+head(predicciones_2)
+```
+
+Para encontrar el error (RMSE), para comparar con los modelos que hemos estudiado, podemos encontrar el valor para el modelo que hicimos para random forest.
+
+```{r}
+h2o.performance(model = random_forest_model, newdata = datos_test_h2o)@metrics$RMSE
+```
+
+Y ahora bien para el modelo de GBM, el error de test será:
+
+```{r}
+h2o.performance(model = gbm_model, newdata = datos_test_h2o)@metrics$RMSE
+```
+
+# Práctica No. 3
+
+1. Siguiendo con el ejemplo de la clase, utilizando los datos de `SaratogaHouses` y los dos modelos empleados (random forest y Gradient Boosting Machine (GBM)), realizar para los dos modelos la optimización de los hiperparámetros. Nota: recuerda utilizar la función `h2o.grid()`, puedes encontrar ejemplos [aquí](https://www.cienciadedatos.net/documentos/44_machine_learning_con_h2o_y_r#Generalized_linear_models_(GLMs)).
+
+
+2. Para este ejercicio utilizaremos los datos de `ames` que se encuentra dentro de la paquetería de `modeldata` (utilizados en la clase pasada). NOTA: Deben instalar primero el paquete de `modeldata`, luego ejecutar el comando de su librería (`library(modeldata)`) y para ejecutar los datos lo hacen con el comando `data(ames)`. 
+
+2.1 Realizar un modelo de predicción del **precio** utilizando *Random Forest* de la paquetería `tidymodels`. 
+
+2.2 Realizar un modelo de predicción del **precio** utilizando *Random Forest* de `h2o`.
+
+2.3 Realizar un modelo de predicción del **precio** utilizando un modelo distinto de los que vimos en clase de `h2o`. [Aquí](https://rpubs.com/Joaquin_AR/406480) te dejo un link donde puedes encontrar varios modelos, pero no necesariamente te debes basar en este.
+
+Realizar el proceso, para ambos casos, desde la partición de los datos, entrenamiento con optimización de hiperparámetros (tu decides cuál método), validación de train, modelo final y validación con datos de test. 
+
+Realizar una comparación entre modelos y definir cuál de los dos tu consideras que debería de ser el modelo para esta predicción y especificar porqué. 
+
+NOTA:  si quieres medir los tiempos de ejecución para comparar este, te recomiendo la paquetería `tictoc` de R, instalas el paquete con `install.packages(tictoc)` luego cargas la librería con `library(tictoc)` y entre las líneas que quieras ver la ejecución del código inicias con `tic()` y finalizas con `toc()`, a continuación un mini ejemplo, donde al final te aparece 0.171 seg elapsed, que es el tiempo que tardó en ejecutar. 
+
+```{r}
+library(tictoc)
+tic()
+
+summary(SaratogaHouses)
+toc()
+```
+
+
+# Referencias
+
+* http://docs.h2o.ai/h2o-tutorials/latest-stable/index.html
+
+* https://docs.h2o.ai/h2o/latest-stable/h2o-r/docs/reference/h2o.randomForest.html
+
+* Joaquín Amat Rodrigo, Machine Learning con H2O y R. Abril 2020. https://rpubs.com/Joaquin_AR/406480
+
